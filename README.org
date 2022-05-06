@@ -1,0 +1,948 @@
+#+TITLE: Satchel User Manual
+#+AUTHOR: Fox Kiester
+#+LANGUAGE: en
+#+TEXINFO_DIR_CATEGORY: Emacs
+#+TEXINFO_DIR_TITLE: Satchel: (satchel).
+#+TEXINFO_DIR_DESC: Satchel of non-keybinding init.el configuration utilities
+
+# NOTE: If you are viewing this in org-mode, it is recommended that you install and enable [[https://github.com/snosov1/toc-org][toc-org]], so that all internal links open correctly
+
+# TODO add some quote and picture
+
+* About
+*NOTE: I do not recommend trying to use this package in your configuration until I have added back tests.  The new functionality in particular has barely been tested and may not work correctly for all cases.  Also, the syntax may change completely before the first release.*
+
+=satch.el= provides non-keybinding init.el configuration utilities for:
+- Settings, hooks, and advice
+- Delayed evaluation and package deferment (which overlaps with hooks and advice)
+
+Satchel does not provide:
+- General or data structure utility functions like cl-lib, dash, map.el, etc.
+- Key definition helpers (see [[https://github.com/noctuid/general.el][general]] and eventually [[https://github.com/noctuid/familiar.el][familiar]])
+- A replacement for use-package
+
+The point of this package is to extract the non-keybinding init.el helpers from my configuration and general.el (like ~general-when~, ~general-setq~, ~general-add-hook~, ~general-advice-add~, etc.) into a separate package.  Additionally, I would like to provide more functionality inspired by Doom Emacs for deferred loading (since these utilities do not exist in a standalone package I am aware of).
+
+For more information on replacing previously Doom-only utilities with standalone packages, see [[#replacing-doom][Replacing Doom]].
+
+* Feature Summary
+- Alternatives to ~setq~, ~set~, and similar functions that work with custom setters
+- Alternatives to ~add-hook~ and ~advice-add~ that allow list arguments (add multiple functions to multiple hooks or as advice) and for "transient" functionality (once some condition is met, run once and remove from all hooks or advised symbols)
+- Utilities for defining functions to add to hooks or as advice
+- A more complex "run once" system that allows defining conditions using hooks, advice, packages, and various checks
+- =use-package= keywords for some of these utilities with extra shorthand (e.g. automatically a hook name or a mode name from the package name)
+
+Here are some quick examples of how these can be useful.
+
+~satch-setq~ is a lightweight ~setq~ alternative that works with variables with custom setters:
+#+begin_src emacs-lisp
+;; `setq' will not work correctly for these variables if the corresponding
+;; package has already been loaded
+(satch-setq auto-revert-interval 10
+            evil-want-Y-yank-to-eol t
+            evil-search-module 'evil-search)
+
+;; add several items to `lsp-file-watch-ignored-directories' to prevent watching
+;; hundreds/thousands of files in python
+(satch-shove lsp-file-watch-ignored-directories
+             '("[/\\\\]\\__pycache__\\'"
+               "[/\\\\]\\.mypy_cache\\'"
+               "[/\\\\]\\.venv\\'"))
+#+end_src
+
+Examples of the hook =use-package= keywords:
+#+begin_src emacs-lisp
+;; Run `company-posframe-mode' on `company-mode-hook' (mode name inferred)
+(use-package company-posframe
+  :shook 'company-mode-hook)
+;; same as
+(use-package company-posframe
+  :shook ('company-mode-hook #'company-posframe-mode))
+
+
+(defun my-lsp-pyright ()
+  "Require lsp-pyright and run `lsp'."
+  (require 'lsp-pyright)
+  ;; ...
+  (lsp))
+
+;; Run `my-lsp-pyright' on `python-mode-hook' (mode hook name inferred)
+(use-package python
+  :config-hook #'my-lsp-pyright)
+;; same as
+(use-package python
+  :config-hook ('python-mode-hook #'my-lsp-pyright))
+
+
+;; Use `global-display-line-numbers-mode' but disable it in some childframes
+(use-package lsp-ui
+  :config-hook
+  ('lsp-ui-doc-frame-mode-hook (satch-disable display-line-numbers-mode)))
+#+end_src
+
+Examples of the =use-package= keyword for ~satch-once~, a swiss army knife for deferring packages/configuration:
+#+begin_src emacs-lisp
+;; Enable `savehist-mode' once the first time `pre-command-hook' runs; during
+;; idle time, incrementally load custom then savehist; this is how Doom loads
+;; savehist
+(use-package savehist
+  :defer-incrementally custom
+  :shook ('pre-command-hook nil :transient t))
+;; OR
+(setq satch-once-allow-shorthand t)
+(use-package savehist
+  :defer-incrementally custom
+  :once 'pre-command-hook)
+;; OR for a more meaningful name
+(use-package savehist
+  :defer-incrementally custom
+  :once satch-input)
+
+;; Enable `magit-todos-mode' after loading magit
+(use-package magit-todos
+  :once "magit")
+;; or after `magit-status'
+(use-package magit-todos
+  :once #'magit-status)
+
+
+;; Install the fonts for all the icons if they have not been installed once the
+;; first GUI frame is created
+(use-package all-the-icons
+  :init
+  (defun all-the-icons-maybe-install-fonts ()
+    "Install fonts for all the icons if they have not been installed."
+    ;; workaround for this functionality not being included by default
+    ;; https://github.com/domtronn/all-the-icons.el/issues/120
+    (when (not (find-font (font-spec :name "all-the-icons")))
+      (all-the-icons-install-fonts t)))
+  :once (satch-gui #'all-the-icons-maybe-install-fonts))
+
+
+;; This is the equivalent of how Doom runs `winner-mode'; `satch-once-buffer' is
+;; a more complex condition that uses both a hook and advice
+(use-package winner
+  :once satch-buffer)
+
+
+;; A more complex user-defined condition
+(defvar my-once-writable-non-prog-mode-condition
+  (list :initial-check (lambda ()
+                         (and (satch-in-an-evil-insert-state-p)
+                              (not (or buffer-read-only
+                                       (derived-mode-p 'prog-mode)))))
+        ;; different check when the hook runs for illustrative purposes (even if
+        ;; though it isn't necessary since `evil-insert-state-entry-hook' runs
+        ;; after `evil-state' has already been changed)
+        :check (lambda ()
+                 (not (or buffer-read-only (derived-mode-p 'prog-mode))))
+        :hooks 'evil-insert-state-entry-hook))
+
+
+;; Require fcitx once in insert state in a writable non-programming buffer
+(use-package fcitx
+  :require-once my-once-writable-non-prog-mode-condition
+  :config
+  (fcitx-aggressive-setup))
+#+end_src
+
+Example of using ~satch-advice-add~ building on the prior =all-the-icons-example=:
+#+begin_src emacs-lisp
+(use-package all-the-icons
+  ;; ...
+  :config
+  ;; prevent breakage in tty
+  ;; https://github.com/hlissner/doom-emacs/blob/29e4719a7d3c9991445be63e755e0cb31fd4fd00/core/core-ui.el#L479
+  (cond
+   ((daemonp)
+    (defun doom--conditionally-disable-all-the-icons-in-tty-a
+        (orig-fn &rest args)
+      "Return a blank string in tty Emacs which doesn't support multiple fonts."
+      (if (or (not after-init-time) (display-multi-font-p))
+          (apply orig-fn args)
+        ""))
+    (satch-advice-add
+     '(all-the-icons-octicon
+       all-the-icons-material
+       all-the-icons-faicon all-the-icons-fileicon
+       all-the-icons-wicon all-the-icons-alltheicon)
+     :around #'doom--conditionally-disable-all-the-icons-in-tty-a))
+   ((not (display-graphic-p))
+    (defun doom--disable-all-the-icons-in-tty-a (&rest _)
+      "Return a blank string for tty users."
+      "")
+    (satch-advice-add
+     '(all-the-icons-octicon
+       all-the-icons-material
+       all-the-icons-faicon all-the-icons-fileicon
+       all-the-icons-wicon all-the-icons-alltheicon)
+     :override #'doom--disable-all-the-icons-in-tty-a))))
+#+end_src
+
+Planned features:
+- Optionally record settings, hooks, advice, etc. with [[https://github.com/noctuid/annalist.el][annalist.el]] (issue #3).  The priority of implementing this is currently low since I don't need this functionality.  Annalist already does all of the work though, so if this is something you really want, please comment on that issue.
+
+* Example Setup
+Since =satchel= is meant to be used in your init.el, you will be requiring it immediately.
+#+begin_src emacs-lisp
+(use-package satch
+  :demand t
+  :config
+  ;; for use-package keywords; see below for a more detailed explanation
+  (eval-and-compile
+    (setq satch-use-package-keyword-prefix "s"
+          satch-use-package-keyword-aliases
+          '(":satch-fhook" ":config-hook"
+            ":satch-once" ":once"
+            ":satch-require-once" ":require-once"
+            ;; if not using Doom
+            ":satch-defer-incrementally" ":defer-incrementally")
+          ;; READ these to understand what they do; don't blindly copy
+          satch-once-shorthand t
+          satch-use-package-once-shorthand t
+          satch-use-package-hook-shorthand t)
+    (require 'satch-use-package))
+
+  ;; for some predefined conditions
+  (require 'satch-conditions))
+#+end_src
+
+* Table of Contents                                            :TOC:noexport:
+- [[#about][About]]
+- [[#feature-summary][Feature Summary]]
+- [[#example-setup][Example Setup]]
+- [[#relationship-with-use-package][Relationship With =use-package=]]
+  - [[#keyword-prefixes][Keyword Prefixes]]
+  - [[#new-keywords][New Keywords]]
+- [[#settingvariable-utilities][Setting/Variable Utilities]]
+  - [[#satch-setq][~satch-setq~]]
+  - [[#satch-set][~satch-set~]]
+  - [[#satch-setq-default][~satch-setq-default~]]
+  - [[#satch-setq-local][~satch-setq-local~]]
+  - [[#setq-hook-and-setq-hook-use-package-keyword][~setq-hook~ and =:setq-hook= use-package keyword]]
+  - [[#satch-pushnew][~satch-pushnew~]]
+  - [[#satch-shove][~satch-shove~]]
+- [[#hook-and-advice-utilities][Hook and Advice Utilities]]
+  - [[#note-on-hook-shorthand][Note on Hook Shorthand]]
+  - [[#satch-add-hook-and-satch-remove-hook][~satch-add-hook~ and ~satch-remove-hook~]]
+  - [[#hook-use-package-keywords][hook use-package keywords]]
+    - [[#satch-hook--shook][=:satch-hook= / =:shook=]]
+    - [[#satch-fhook--config-hook][=:satch-fhook= / =:config-hook=]]
+  - [[#satch-advice-add--satch-add-advice-and-satch-advice-remove--satch-remove-advice][~satch-advice-add~ / ~satch-add-advice~ and ~satch-advice-remove~ / ~satch-remove-advice~]]
+- [[#function-definition-utilities][Function Definition Utilities]]
+  - [[#satch-defun][~satch-defun~]]
+  - [[#satch-disable][~satch-disable~]]
+  - [[#satch-fn---does-not-exist][~satch-fn~ - does not exist]]
+- [[#other-deferred-evaluation-utilities][Other Deferred Evaluation Utilities]]
+  - [[#eval-after-load-alternatives][~eval-after-load~ Alternatives]]
+  - [[#satch-with-package][~satch-with-package~]]
+  - [[#once-only-deferred-evaluation][Once Only Deferred Evaluation]]
+    - [[#satch-call-once][~satch-call-once~]]
+    - [[#satch-once][~satch-once~]]
+    - [[#condition-system][Condition System]]
+      - [[#hooks][=:hooks=]]
+      - [[#packages][=:packages=]]
+      - [[#advice][advice]]
+      - [[#check][=:check=]]
+      - [[#initial-check][=:initial-check=]]
+      - [[#local-checks][Local Checks]]
+    - [[#condition-shorthand][Condition Shorthand]]
+    - [[#satch-once--once][=:satch-once= / =:once=]]
+    - [[#satch-require-once-and-satch-require-once][~satch-require-once~ and =:satch-require-once=]]
+    - [[#require-after-after-call-etc][=:require-after=, =:after-call=, etc.]]
+    - [[#pre-defined-conditions][Pre-defined Conditions]]
+      - [[#satch-once-gui-and-satch-once-tty][~satch-once-gui~ and ~satch-once-tty~]]
+      - [[#satch-once-buffer][~satch-once-buffer~]]
+      - [[#satch-once-window][~satch-once-window~]]
+      - [[#satch-once-init][~satch-once-init~]]
+  - [[#defer-incrementally-and-defer-incrementally][~defer-incrementally~ and =:defer-incrementally=]]
+- [[#comparison-with-other-packages][Comparison With Other Packages]]
+  - [[#comparison-with-add-hooks][Comparison With =add-hooks=]]
+  - [[#comparison-with-generalel][Comparison with =general.el=]]
+- [[#replacing-doom][Replacing Doom]]
+
+* Relationship With =use-package=
+Satchel is orthogonal to =use-package=.  It can be used with or without it and provides =use-package= keywords if you ~(require 'satchel-use-package)~.  The philosophy of the =use-package= keywords is to match the syntax of the underlying utilities as closely as possible, providing extra functionality only when it is possible to allow shorthand given the package name.
+
+** Keyword Prefixes
+By default, all keywords are prefixed with =:satch= (e.g. =:satch-hook=) to prevent clashes with other builtin or extra keywords.  It is recommend you set this to something shorter after confirming there are no clashes with the keywords in your current =use-package-keywords=.  This must be done /before/ requiring =satch-use-package=:
+#+begin_src emacs-lisp
+(eval-and-compile
+  (setq satch-use-package-keyword-prefix "s")
+  (require 'satch-use-package))
+#+end_src
+
+This variable needs to be set at compile time if you are compiling your init.  Like =use-package=, =satch-use-package= is not required at load time when compiling, and you can optionally use ~eval-when-compile~ instead.  If you are not sure what this means, just follow the example above, which will work in all cases.  Note that compiling your init file is not generally recommended, and if you are not aware of the caveats, you probably should not be compiling your init file.
+
+You can also change individual keywords that do not conflict with others by setting =satch-use-package-keyword-aliases=.  This compares with the full starting keyword name and has precedence over =satch-use-package-keyword-prefix=, which only applies to keywords not found in the aliases plist:
+#+begin_src emacs-lisp
+(eval-and-compile
+  (setq satch-use-package-keyword-prefix "s"
+        satch-use-package-keyword-aliases
+        '(":satch-fhook" ":config-hook"
+          ":satch-once" ":once"
+          ":satch-require-once" ":require-once"
+          ;; if not using Doom
+          ":satch-defer-incrementally" ":defer-incrementally"))
+  (require 'satch-use-package))
+#+end_src
+
+** New Keywords
+Satchel does not currently support use-package keywords for all functionality mostly because I do not see the point in adding a keyword for every helper instead of just using them in =:config= or =:init=.  The current logic is to mainly provide keywords that meet one of the following conditions:
+
+- Keywords that are meant to automatically load the package on some condition (=:satch-hook= and =:satch-once=)
+- Keywords that can make use of the package name to guess some of the arguments (=:satch-hook= and =:satch-fhook=)
+
+If you want extra keywords, feel free to open an issue explaining why (e.g. a keyword for =satch-setq= for organizational reasons).
+
+Each use-package keyword is explained in the same section for that functionality below.
+
+* Setting/Variable Utilities
+~setq~ has a some downsides.  If a ~defcustom~ variable used =:set= to define a custom setter (e.g. =auto-revert-interval=), using ~setq~ for it will not work correctly if the package has been loaded.  ~customize-variable~ can be used but also has some annoyances.  For example, it doesn't support defining multiple variables at once.  There are other alternatives, but they are not as lightweight as ~setq~ and they all do extra things you probably don't need.  For example, ~customize-variable~  can be called interactively, will attempt to load variable dependencies, and allows the user to specify comments.  From some basic testing ~satch-setq~ is 10x to 100x faster because it does not include this functionality, but the speed difference should not really be noticeable if you aren't setting thousands of variables during initialization.
+
+=satch.el= provides setters that are more similar to what most people use but still handle custom setters correctly.  They will also eventually optionally record settings for later display with =annalist.el=.
+
+** ~satch-setq~
+It has the same syntax as ~setq~ but supports custom setters.
+
+Here's an example using variables that have a custom setter:
+#+begin_src emacs-lisp
+(satch-setq auto-revert-interval 10
+            evil-want-Y-yank-to-eol t
+            evil-search-module 'evil-search)
+;; if you use it a lot, you can always define a shorter alias
+(defalias 'ssetq  #'satch-setq)
+#+end_src
+
+Note that ~setq~ will work as expected as long it is used before the corresponding package is loaded, but with ~customize-set-variable~ or ~satch-setq~, you do not need to worry about whether or not the package has been loaded.
+
+One major difference from ~customize-set-variable~ that you should be aware of is that ~satch-setq~ falls back to using ~set~ instead of ~set-default~.  This means that when there is no custom setter, like ~setq~, it will alter the local value of buffer-local variables instead of the default value.  You can use ~satch-setq-default~ to instead fall back to altering the default value, but really it shouldn't matter.  I have not seen custom setters for for variables that are buffer-local.  The custom setters just use ~set-default~ (e.g. if you make ~auto-revert-interval~ into a buffer-local variable, and then call its custom setter, it will change the default value).
+
+** ~satch-set~
+Like ~satch-setq~ but it evaluates the variable positions like ~set~.
+
+#+begin_src emacs-lisp
+(defvar foo 2)
+(satch-set 'foo 3)
+#+end_src
+
+** ~satch-setq-default~
+Like ~satch-setq~ but it falls back to ~set-default~ when there is no custom setter.
+
+** ~satch-setq-local~
+Like ~satch-setq~ but makes all variables buffer local.
+
+** ~setq-hook~ and =:setq-hook= use-package keyword
+Not yet implemented.
+
+** ~satch-pushnew~
+Like ~cl-pushnew~, but =:test= defaults to equal, and it will call a custom setter afterwards if one exists.
+
+#+begin_src emacs-lisp
+(satchel-pushnew 'python-mode aggressive-indent-excluded-modes)
+#+end_src
+
+** ~satch-shove~
+This has the same functionality as ~satch-pushnew~, but the place comes first and the second argument is a list of values to add (more like ~setq~, ~add-to-list~, and ~nconc~ though it is still wrapping ~cl-pushnew~ and accepts ~cl-pushnew~ keywords).
+
+#+begin_src emacs-lisp
+(satch-shove lsp-file-watch-ignored-directories
+             '("[/\\\\]\\__pycache__\\'"
+               "[/\\\\]\\.mypy_cache\\'"
+               "[/\\\\]\\.venv\\'"))
+#+end_src
+
+* Hook and Advice Utilities
+Unlike, use-package's =:hook= and other commonly used hook and advice helpers, satchel's hook and advice helpers try to mirror the syntax of the builtin ~add-hook~ and ~advice-add~, so that they can be used as drop-in replacements.  If you prefer a different syntax like =(advise :around <oldfun> <newfun>)=, it is trivial to write a macro around the utilities satchel provides to support this.
+
+** Note on Hook Shorthand
+As shown in [[#feature-summary][Feature Summary]], satchel provides some shorthand to guess mode and hook names and to guess if symbols are hooks or functions.  It may be surprising then to learn that ~satch-add-hook~ does not currently support the common functionality of adding =-hook= to the end of symbols in the hook position.  I don't think there is any real benefit of this.  It only saves typing 5 characters.  Having the full hook name makes it more immediately obvious that a symbol is a hook.  For example, this helps distinguish the usage difference between =:satch-hook= and =:satch-fhook=.  Otherwise, you could do something like this:
+#+begin_src emacs-lisp
+(use-package lispy
+  :shook 'lisp-mode)
+
+(use-package org
+  :config-hook 'visual-line-mode)
+#+end_src
+
+This is less clear than it could be.  Here I've incorrectly forgotten to sharp-quote ~visual-line-mode~, so until I examine the surrounding context, it's not clear if it's a function or a hook.  Even if I hadn't done this, what about the first =use-package=?  Normally something ending in =-mode= is a function.  Did I forget to sharp quote here?  Well no, I can see the =:shook= and know that lispy provides a minor mode to know that this is fine, but I don't think having to type 5 less characters is worth this reduction in clarity.
+
+A better functional example of an upside of explicitly specifying a hook name is that it allows using ~helpful-at-point~ on the symbol.
+
+The point is that explicitly including =hook= is not needless verbosity, and I think it is better to write a configuration prioritizing readability over verbosity when the two cannot be reconciled.
+
+It may seem inconsistent for me to not provide this shorthand but provide other forms of shorthand, but these are the guidelines I've tried to follow when introducing shorthand in satchel:
+
+- If shorthand can handle all reasonable situations correctly, then allow it by default.  This is why ~satch-once~ currently accepts either a list of forms or functions without configuration.
+- Shorthand with serious caveats is opt-in.  In general.el, there was a lot of functionality provided by default that could not perfectly handle every situation and required special handling of some cases.  This can be confusing.  Therefore in satchel, users must confirm they understand the limitations of shorthand before using it by setting the corresponding variables.
+- Don't include shorthand that excludes part of symbols rather than entire symbols
+- Don't include shorthand when there is no way to fall back to full syntax to handle special cases
+
+The last two points are related and are why I have not added =-hook= addition shorthand.
+
+For example, the =:shook= shorthand can guess a mode name, but you still specify the full hook name.  When the mode name is not guessable from the package, you can fall back to the full ~satch-add-hook~ argument list to specify mode to run on the hook, so it meets these requirements.
+
+In the case of adding =-hook=, some hooks end with =-functions= instead.  The shorthand could check for this, but the problem is that how a hook name ends is not enforced.  You can name a hook whatever you want to.  While you should not encounter a situation with a differently named hook, it would be impossible to handle without introducing new syntax, and I want ~satch-add-hook~ to remain compatible with ~add-hook~.  Therefore, adding =-hook= automatically will never be the default.
+
+Unlike =-hook= addition shorthand, ~satch-once~ condition shorthand can be also replaced with the full condition syntax if there happened to be any unusually named hooks.  It's also worth noting, that it would be impossible to combine this =-hook= addition shorthand with ~satch-once~ shorthand, which depends on the =-hook= or =-functions= being present to distinguish hooks from symbols to advise.
+
+If you still feel that you should have the option to use this shorthand, please make an issue.  I might consider adding it with a strong warning, making it opt-in.
+
+** ~satch-add-hook~ and ~satch-remove-hook~
+~satch-add-hook~ can act as a drop-in replacement for ~add-hook~, but it supports lists for hooks and functions.
+
+For example:
+#+begin_src emacs-lisp
+(satch-add-hook my-lisp-mode-hooks
+                (list #'lispy-mode #'rainbow-delimiters-mode))
+#+end_src
+
+~satch-add-hook~ can also add "transient" functions to hooks that will run once and then remove themselves from all hooks (inspired by ~eval-after-load~ and Doom Emacs).
+
+For example, ~cl-lib-highlight-initialize~ from the =cl-lib-highlight= package only needs to be run once:
+#+begin_src emacs-lisp
+(satch-add-hook 'emacs-lisp-mode-hook #'cl-lib-highlight-initialize
+                :transient t)
+#+end_src
+
+The argument to =:transient= can also be a check function.  In this case, the function added to the hook will only run and then be removed once the check function returns non-nil.  For example, here is the old definition of ~satch-after-gui~:
+#+begin_src emacs-lisp
+(defmacro satch-after-gui (&rest body)
+  "Run BODY once after the first GUI frame is created."
+  (declare (indent 0) (debug t))
+  `(if (and (not (daemonp)) (display-graphic-p))
+       (progn ,@body)
+     (satch-add-hook 'server-after-make-frame-hook
+                     (lambda ()
+                       ,@body)
+                     :transient #'display-graphic-p)))
+#+end_src
+
+Note that if the argument to =:transient= is a function, it will be passed any arguments (i.e. if the hook is run with ~run-hook-with-args~).
+
+You can always use ~satch-once~ in place of transiently adding a hook.  If more complex conditions are required, you may be better off using (or have to use) ~satch-once~ instead, which is how ~satch-after-gui~ is implemented now.
+
+The only additional functionality of ~satch-remove-hook~ is to support lists:
+#+begin_src emacs-lisp
+(satch-remove-hook my-lisp-mode-hooks
+                   (list #'lispy-mode #'rainbow-delimiters-mode))
+#+end_src
+
+** hook use-package keywords
+Satchel provides two alternatives to use-package's =:hook= that use ~satch-add-hook~ called =:satch-hook= and =:satch-fhook=.  Both take any number of arguments of symbols or lists.  List arguments work the same for both; they correspond to a list of arguments for ~satch-add-hook~.  The primary difference between the two is that symbol arguments to =:satch-hook= are /hooks/, but they are /functions/ for =:satch-fhook= (hence the =f=).  =:satch-hook= is intended for loading the package, and =:satch-fhook= is meant for configuring it.  From now on, these keywords will be referred to by their suggested aliases =:shook= and =:config-hook=.
+
+*** =:satch-hook= / =:shook=
+=:shook= is for specifying a hook to load a package.  The primary use case is to add a package's minor mode function to some user-specified /hook/, so that when hook is run, the package will be loaded and the mode enabled.  This means that =:shook= will usually imply =:defer t=.  While it does not always imply =:defer t=, it will add any non-lambda functions to =:commands= (this is the same behavior as =:hook=).  Though this is usually unnecessary (the functions probably already have autoloads unless you've defined them in =:config=), it will in turn imply =:defer t=.
+
+Symbols specified with =:shook= correspond to hooks, and the function to add to each hook is inferred from the package's name (i.e. =-mode= is automatically added to the package name unless the package's name already ends in =-mode=). For example, these are all the same:
+#+begin_src emacs-lisp
+;; setup
+(eval-and-compile
+  ;; required to specify a hook alone instead of the full argument list
+  ;; by setting this, you confirm that the shorthand only works for symbols
+  ;; (quoted or unquoted) not lists (see the next heading for an example)
+  (setq satch-use-package-hook-shorthand t)
+  (require 'satch-use-package))
+
+;; add `rainbow-delimiters-mode' to `prog-mode-hook'
+(use-package rainbow-delimiters
+  :shook 'prog-mode-hook)
+
+(use-package rainbow-delimiters
+  ;; a `satch-add-hook' arglist
+  ;; a missing FUNCTIONS argument will be replaced with inferred minor mode
+  :shook ('prog-mode-hook))
+
+(use-package rainbow-delimiters
+  ;; a null, keyword, or non-symbol placeholder for FUNCTIONS will be replaced
+  ;; with inferred minor mode command; this may be useful if you want to keep
+  ;; the inferred command but also want to set the DEPTH and/or LOCAL arguments
+  ;; afterwards; for this specific example, you don't actually need to change
+  ;; DEPTH
+  :shook ('prog-mode-hook nil t))
+
+;; more explicit; recommended
+(use-package rainbow-delimiters
+  :shook ('prog-mode-hook :infer t))
+
+(use-package rainbow-delimiters
+  ;; the full arglist for `general-add-hook' can be specified
+  ;; this is necessary if inference is not possible (see below for an example)
+  :shook ('prog-mode-hook #'rainbow-delimiters-mode))
+
+;; without :shook
+(use-package
+  ;; :commands implies :defer t
+  :commands rainbow-delimiters-mode
+  :init (satch-add-hook 'prog-mode-hook #'rainbow-delimiters-mode))
+#+end_src
+
+If you are already familiar with =:hook=, you should note that there are quite a few syntactic differences between =:shook= and =:hook=.  Firstly, quoting the hooks and functions is required.  =:shook= uses the same syntax as ~(satch-)add-hook~ for both clarity and convenience.  For example, the user may want to specify a variable containing a list of hooks instead of an actual hook name:
+#+begin_src emacs-lisp
+(defconst my-lisp-mode-hooks
+  '(lisp-mode-hook
+    emacs-lisp-mode-hook
+    clojure-mode-hook
+    scheme-mode-hook
+    ;; ...
+    ))
+
+(use-package lispy
+  :shook my-lisp-mode-hooks)
+
+;; same as
+(use-package lispy
+  :shook (my-lisp-mode-hooks))
+
+;; same as
+(use-package lispy
+  ;;  `satch-add-hook' can take a list of hooks for the HOOK argument
+  :shook ('(lisp-mode-hook
+            emacs-lisp-mode-hook
+            clojure-mode-hook
+            scheme-mode-hook
+            ;; ...
+            )))
+#+end_src
+
+Furthermore, =:shook= will not automatically add =-hook= to specified hook symbols (i.e. you must specify =prog-mode-hook=; =prog-mode= is not sufficient).  See [[#note-on-hook-shorthand][Note on Hook Shorthand]] for the reasoning.
+
+Lastly, =:hook= only takes one argument, whereas =:shook= can take an arbitrary number of arguments:
+#+begin_src emacs-lisp
+(use-package lispy
+  ;; any number of symbols (or argument lists) is allowed
+  :shook
+  'lisp-mode-hook
+  'emacs-lisp-mode-hook
+  'clojure-mode-hook
+  'scheme-mode-hook)
+#+end_src
+
+Note that if the function name cannot be inferred from the package name (i.e. the package name or the package name with =-mode= appended is not correct), you need to specify a full ~satch-add-hook~ arglist:
+#+begin_src emacs-lisp
+(use-package yasnippet
+  :shook ('(text-mode-hook prog-mode-hook) #'yas-minor-mode))
+#+end_src
+
+*** =:satch-fhook= / =:config-hook=
+=:config-hook= is for specifying functions to add to a package's mode hook.  It is suited for enabling minor modes or running setup/configuration functions.  The hook is inferred from the package's name (by appending either =-mode-hook= or just =-hook= if the package's name ends in =-mode=).  If the hook cannot be inferred from the package name, then the full arglist must be specified just as with =:shook=. Unlike =:shook=, =:config-hook= never adds functions to =:commands= and therefore never implies =:defer t=.  This is because the functions specified are ones that should be run when turning on (or toggling) the mode(s) the package provides.  The specified functions are external to the package, could be called elsewhere, and therefore should not trigger the package to load.  The following use-package statements all have the same effect:
+#+begin_src emacs-lisp
+(use-package org
+  ;; For a major-mode package, you might use :mode to imply :defer t (or just
+  ;; use :defer t; or just `use-package-always-defer' which I personally prefer)
+  :config-hook
+  #'visual-line-mode
+  #'my-org-setup
+  ;; ...
+  )
+
+;; this is also valid but less concise
+(use-package org
+  ;; specify null or non-symbol placeholder for HOOKS to use inferred hook
+  :gfhook (nil (list #'visual-line-mode #'my-org-setup)))
+
+(use-package org
+  :init
+  (general-add-hook 'org-mode-hook (list #'visual-line-mode #'my-org-setup)))
+#+end_src
+
+Like with =:shook=, =:config-hook= still requires quoting, so you can use variables and function/macro calls to generate the function to add to the hook:
+#+begin_src emacs-lisp
+(use-package proced
+  :config-hook (nil (satch-disable visual-line-mode)))
+#+end_src
+
+Note that even with =satch-use-package-hook-shorthand= enabled, you cannot simplify the above case.  The shorthand only supports symbols and functions like ='symbol= and =#'function=.
+#+begin_src emacs-lisp
+;; INVALID! it will be interpreted as an argument list where
+;; satch-disable is a variable containing hooks
+(use-package proced
+  :config-hook (satch-disable visual-line-mode))
+#+end_src
+
+Although you could use =:config-hook= to enable minor modes for some major mode (e.g. enable flyspell inside ~(use-package org)~), it is probably more logical/organized to group these hooks along with their minor modes' use-package declarations (e.g. using =:shook=).  =:config-hook= is more suited for setup functions.  Expanding on the proced example:
+#+begin_src emacs-lisp
+(defun my-proced-setup ()
+  (visual-line-mode -1)
+  ;; not global; has to be run in buffer
+  (proced-toggle-auto-update t))
+
+(use-package proced
+  :config-hook #'my-proced-setup)
+#+end_src
+
+** ~satch-advice-add~ / ~satch-add-advice~ and ~satch-advice-remove~ / ~satch-remove-advice~
+~satch-add-hook~ can act as a drop-in replacement for ~add-hook~, but it supports lists for hooks and functions.
+#+begin_src emacs-lisp
+;; run these commands in the base buffer when using polymode
+(satch-advice-add '(outline-toggle-children
+                    counsel-outline
+                    counsel-semantic-or-imenu
+                    consult-outline
+                    consult-org-heading
+                    worf-goto)
+                  :around #'polymode-with-current-base-buffer)
+#+end_src
+
+Like ~satch-add-hook~, it supports "transient" advice.  See [[#satch-add-hook-and-satch-remove-hook][~satch-add-hook~ and ~satch-remove-hook~]] for more information.
+#+begin_src emacs-lisp
+(use-package ox-hugo
+  :init
+  ;; only require ox-hugo-auto-export if I visit my blog directory
+  (satch-advice-add 'after-find-file
+                    :before
+                    (lambda (&rest _)
+                      (org-hugo-auto-export-mode))
+                    :transient #'my-blog-dir-p))
+#+end_src
+
+Because I don't like the difference in naming between default advice and hook functions, ~satch-add-advice~ and ~satch-remove-advice~ are also provided as aliases.
+
+* Function Definition Utilities
+These are mainly provided to make generating commands or functions to add to hooks a little easier.  You can alias these to something shorter if you use them often.
+
+** ~satch-defun~
+This is ~defun~, but it is guaranteed to return the generated function.  ~defun~ has an undefined return value.  Though ~defun~ currently returns the created function, that could potentially change.  Even if it is unlikely to change, it is best to be safe and not rely on undefined behavior.
+
+** ~satch-disable~
+Returns a named function to disable a mode.  This is useful for generating a function to add to a hook.
+
+#+begin_src emacs-lisp
+(satch-disable display-line-numbers-mode)
+;; expands to
+(satch-defun satch-disable-display-line-numbers-mode (&rest _)
+  "Disable display-line-numbers-mode."
+  (display-line-numbers-mode -1))
+#+end_src
+
+Example usage:
+#+begin_src emacs-lisp
+(use-package lsp-ui
+  :config-hook
+  ('lsp-ui-doc-frame-mode-hook (satch-disable display-line-numbers-mode))
+#+end_src
+
+** ~satch-fn~ - does not exist
+Like clojure's fn, generate a lambda with implicit arguments.  This is too general purpose for satchel and also does not exist because [[https://git.sr.ht/~tarsius/l][l]] (on MELPA) and [[https://github.com/abo-abo/short-lambda][short-lambda]] exist, which I will recommend using instead.
+
+* Other Deferred Evaluation Utilities
+** ~eval-after-load~ Alternatives
+Satchel provides ~satch-eval-after-load~, ~satch-with-eval-after-load~, and ~satch-with-package~ as ~eval-after-load~ alternatives.  The difference is that if a package has already loaded, the satchel versions will not needlessly add anything to =after-load-alist=.  ~eval-after-load~ will always add to =after-load-alist=. See [[][here]] for some background information.  If the package/file has not yet loaded, the satchel versions will also remove from =after-load-alist= after the file loads.
+
+The functional difference is that with ~eval-after-load~, the given form will run every time the specified file is loaded.  With ~satch-eval-after-load~, the given form will only run once.  This difference usually should not matter, though I think the satchel version is usually what a user wants.  If for whatever reason you need the original behavior, keep using ~eval-after-load~.  These alternatives are mainly provided for consistency with ~satch-call-once~ (run some code /only once/) and because I already had to implement the underlying functionality for ~satch-call-once~.
+
+** ~satch-with-package~
+~satch-with-package~, which also has ~satch-with~ as an alias, is built on top of ~satch-with-eval-after-load~.  If you have a lot of configuration for a particular package and want to split it up (especially in an org configuration if you want to split package configuration between multiple headings), you can use ~use-package~ for the initial setup and use ~satch-with~ afterwards.
+
+#+begin_src emacs-lisp
+(use-package foo
+  :shook 'some-hook)
+;; ...
+(satch-with 'foo
+  (more-configuration))
+#+end_src
+
+~satch-with~ currently has no extra functionality over ~satch-with-eval-after-load~, but once recording settings, hooks, etc. with annalist.el is added as an option, it will allow automatically associating recorded information with the given package name.  I may also add additional features in the future like allowing the user to conditionally demote errors within ~satch-with~.
+
+** Once Only Deferred Evaluation
+*** ~satch-call-once~
+~satch-call-once~ is a more flexible way of deferring code/package loading.  If using just hooks, advice, or ~eval-after-load~ is not good enough, ~satch-call-once~ can be used to create a condition to run the code that combines them along with various optional checks.
+
+The "once" has two meanings:
+- Run something once some condition is met (hook run OR advised function run OR package load and optional extra checks)
+- Run it only once (unlike normal hooks, normal advice, and ~eval-after-load~)
+
+It is inspired by ~evil-delay~, Doom's =:after-call=, Doom's ~defer-until!~, etc.
+
+Here is an example if it being used in place of Doom's =:after-call=:
+#+begin_src emacs-lisp
+;; This is how Doom loads pyim at the time of writing; I believe Doom has
+;; switched to just using `pre-command-hook' for some packages, but the point is
+;; that `satch-call-once' can use both hooks and advice (whichever runs first)
+(use-package pyim
+  :after-call after-find-file pre-command-hook
+  ;; ...
+  )
+
+;; with `satch-call-once'
+(satch-call-once (list :hooks pre-command-hook :before #'after-find-file)
+                 (lambda () (require 'pyim)))
+
+;; or with shorthand enabled and :once
+(use-package pyim
+  :once ((list 'pre-command-hook #'after-find-file)
+         (require 'pyim)))
+
+;; or with shorthand enabled and :require-once
+;; quoting is required so that variables can be used for the condition
+(use-package pyim
+  :require-once 'pre-command-hook #'after-find-file)
+#+end_src
+
+Unlike ~satch-add-hook~ and ~satch-advice-add~, the functions specified to run for ~satch-call-once~ should take no arguments.
+
+~satch-call-once~ is more generic than =:after-call= and the other mentioned utilities and can handle most conditions for which you want to load a package or run some code.  For more information on specifying conditions, see [[#condition-system][Condition System]].  For examples see below and the pre-defined conditions in =satch-conditions.el=.
+
+*** ~satch-once~
+~satch-once~ is a convenience macro over ~satch-call-once~ that can act as a drop-in replacement for sane invocations.  If the first argument is something that could be a function (symbols, functions, variables, and lambdas), all arguments are considered to be functions.  Otherwise, all arguments are considered to be forms.
+
+#+begin_src emacs-lisp
+(satch-call-once condition #'foo 'bar some-func-in-var (lambda () (require 'baz)))
+
+;; same effect
+(satch-once condition
+  (foo)
+  (bar)
+  (funcall some-func-in-var)
+  (require 'baz))
+;; expands to
+(satch-call-once
+  condition
+  (lambda ()
+    (foo)
+    (bar)
+    (funcall some-func-in-var)
+    (require 'baz)))
+#+end_src
+
+*** Condition System
+At least one of =:hooks=, =:packages=, and the advice keywords should be specified.  When more than one is specified, any of them can trigger the condition (the behavior is OR not AND).  The check keywords are optional.
+
+**** =:hooks=
+=:hooks= should be 1+ hooks that can trigger the functions to run.
+
+#+begin_src emacs-lisp
+;; call `cl-lib-highlight-initialize' the first time `emacs-lisp-mode-hook' runs
+(satch-once (list :hooks 'emacs-lisp-mode-hook) #'cl-lib-highlight-initialize)
+;; or with shorthand enabled
+(satch-once 'emacs-lisp-mode-hook #'cl-lib-highlight-initialize)
+#+end_src
+
+**** =:packages=
+=:packages= should be 1+ packages that can trigger the functions to run when loaded.
+
+#+begin_src emacs-lisp
+;; load yasnippet-snippets as soon as yasnippet is loaded
+(satch-once (list :packages 'yasnippet)
+  (require 'yasnippet-snippets))
+;; or if shorthand is enabled
+(satch-once "yasnippet"
+  (require 'yasnippet-snippets))
+#+end_src
+
+**** advice
+Any WHERE keyword (e.g. =:before=) can be used to specify advice:
+
+#+begin_src emacs-lisp
+;; enable `global-hardhat-mode' after finding a file
+(satch-once (list :before #'after-find-file) #'global-hardhat-mode)
+;; or if shorthand is enabled
+(satch-once #'after-find-file #'global-hardhat-mode)
+#+end_src
+
+**** =:check=
+=:check= can be specified as a function to run to determine whether to run now.  It will be passed no arguments.
+
+If no check is given, the code to run will always be delayed.  The only exception is if you use =:packages= and a package has already been loaded.  In that case, the code will run immediately.
+
+When a check is given and it returns non-nil the code will be run immediately.  Otherwise, it will be delayed.  Then later when a hook runs, package loads, or advised symbol is called, the check will run again to determine whether to run the delayed code now or continue to wait.
+
+#+begin_src emacs-lisp
+;; run `unicode-fonts-setup' for the first GUI frame
+(satch-once (list :check #'display-graphic-p
+                  :hooks 'server-after-make-frame-hook)
+  (unicode-fonts-setup))
+#+end_src
+
+**** =:initial-check=
+=:initial-check= is like check but only at the beginning to determine whether to initially delay or run the code.  When both are specified, it overrides =:check=.  If you always want to delay initially and you have a check, you can use =:check #'some-check :initial-check (lambda () nil)=.
+
+#+begin_src emacs-lisp
+;; this is not the most practical example but should illustrate that different
+;; checks can potentially make sense
+(satch-once (list :initial-check (lambda () after-init-time)
+                  :hooks 'after-init-hook)
+  (column-number-mode)
+  (size-indication-mode))
+;; or
+(require 'satch-conditions)
+(satch-once satch-init
+  (column-number-mode)
+  (size-indication-mode))
+#+end_src
+
+**** Local Checks
+Having checks for individual triggers is also possible:
+#+begin_src emacs-lisp
+(list :hooks (list 'some-hook #'some-check) 'no-check-hook
+      :before (list #'some-fun #'another-check) #'no-check-fun
+      :packages (list 'evil #'yet-another-check) 'no-check-package)
+#+end_src
+
+Unlike =:check= and =:initial-check=, local checks are passed the arguments the hook (in the case of ~run-hook-with-args~) or advised symbol were run with.  Packages can take a local check, but it won't be passed any arguments and may not be useful.
+
+Local checks allow mimicking the behavior of ~evil-delay~ and Doom's ~defer-until!~.
+#+begin_src emacs-lisp
+(satch-once (list :hooks (list 'after-load-functions
+                               (lambda (&rest _)
+                                 (boundp 'evil-normal-state-map))))
+  (define-key evil-normal-state-map ...))
+;; better to just do this; `satch-once' is not needed
+(satch-with 'evil
+  (define-key evil-normal-state-map ...))
+#+end_src
+
+For use cases, see how ~evil-delay~ and ~defer-until!~ are used.  Hooks you might use would be =after-load-functions= and =post-command-hook=.  You probably will not normally need this functionality, but it is there if you do need it.
+
+*** Condition Shorthand
+It is generally recommended that you store more complex conditions in a reusable, named variable using the full condition syntax like =satch-conditions.el= does.  However, it is possible to use shorthand for more simple cases.  This means you do not need to explicitly specify =:hooks=, =:before= (and other advice keywords), or  =:packages=.
+
+The type will be inferred as follows:
+- Packages must be specified as strings (files name not feature name)
+- Hooks must be symbols ending in =-hook= or =-functions=
+- All other symbols will be considered to be functions to advise =:before=
+
+Any keyword arguments (=:check= and =:initial-check=) must be specified last.
+
+To enable shorthand, set =satch-once-shorthand= to non-nil.  By setting this, you confirm that you understand how the inference works (e.g. you should not be surprised if you try ~(satch-once '(evil ...) ...)~ and it does not work).
+
+#+begin_src emacs-lisp
+(setq satch-once-shorthand t)
+
+(satch-once (list #'foo bar-mode-hook "some-file") ...)
+(satch-once "evil" ...)
+(satch-once 'ibuffer-mode-hook 'all-the-icons-ibuffer-mode)
+#+end_src
+
+*** =:satch-once= / =:once=
+=:satch-once= is a use-package keyword that just takes a ~satch-once~ argument list:
+
+#+begin_src emacs-lisp
+(require 'satch-conditions)
+
+(use-package which-key
+  :once (satch-input #'which-key-mode))
+
+(use-package editorconfig
+  :once (satch-buffer #'editorconfig-mode))
+
+(use-package magit-todos
+  :once ((list :packages 'magit) #'magit-todos-mode))
+#+end_src
+
+When ~satch-once-shorthand~ and ~satch-use-package-once-shorthand~ are non-nil, you can use shorthand like with =:satch-hook=:
+#+begin_src emacs-lisp
+;; enable `which-key-mode' on the first input
+(use-package which-key
+  :once 'pre-command-hook)
+;; or
+(require 'satch-conditions)
+(use-package which-key
+  :once satch-input)
+
+(use-package editorconfig
+  :once satch-buffer)
+
+(use-package magit-todos
+  :once "magit")
+#+end_src
+
+Note that like with use-package hook shorthand, any list will considered to be an argument list.  You cannot do this:
+#+begin_src emacs-lisp
+;; WRONG!
+(use-package editorconfig
+  :once (some-function-that-generates-a-condition-list))
+#+end_src
+
+*** ~satch-require-once~ and =:satch-require-once=
+~satch-require-once~ will require a package once some condition is met.  It is a more generic version of Doom's =:after-call=:
+
+#+begin_src emacs-lisp
+(satch-require-once (list :packages 'magit) 'forge)
+;; or with use-package
+(use-package forge
+  :require-once (:packages 'magit))
+;; or
+(use-package forge
+  :require-once (:after #'magit-status))
+#+end_src
+
+When ~satch-once-shorthand~ is enabled, you can also use shorthand:
+#+begin_src emacs-lisp
+(satch-require-once "magit" 'forge)
+;; or with use-package
+(use-package forge
+  :require-once "magit")
+;; or
+(use-package forge
+  ;; this will use :before advice unlike above example
+  :require-once #'magit-status)
+#+end_src
+
+*** =:require-after=, =:after-call=, etc.
+I have not added these but am considering it. =:require-after= would be like =:after= and only support packages.  The difference would be that =:init= would still run immediately, and all it would do would be to require the package.  It probably also would not support a complex condition system.
+
+#+begin_src emacs-lisp
+;; instead of this
+(use-package tree-sitter-langs
+  :after tree-sitter
+  :demand t)
+; this
+(use-package tree-sitter-langs
+  :require-after tree-sitter)
+#+end_src
+
+=:after-call= would just be like Doom's version.  It would disallow packages and only accept hooks/functions, which would allow not needing to quote them.
+
+*** Pre-defined Conditions
+For some predefined ~satch-once~ conditions, ~(require 'satch-conditions)~.  All conditions come with a corresponding macro and variable, e.g. ~satch-after-gui~ and ~satch-gui~.
+
+**** ~satch-once-gui~ and ~satch-once-tty~
+~satch-once-gui~ and ~satch-once-tty~ can be used to run some code once once the first graphical or terminal frame is created (now if the current frame already is).  Here is an example use case:
+#+begin_src emacs-lisp
+(require 'satch-conditions)
+
+(use-package clipetty
+  :init
+  ;; only need to load if create a terminal frame
+  ;; `global-clipetty-mode' will not cause issues if enabled for a server with
+  ;; both graphical and terminal frames
+  (satch-once-tty
+    (global-clipetty-mode)))
+
+;; or
+(use-package clipetty
+  :once (satch-tty #'global-clipetty-mode))
+#+end_src
+
+**** ~satch-once-buffer~
+This condition will activate when switching buffers or after finding a file.  It is the equivalent of using Doom's =doom-first-buffer-hook=.
+
+**** ~satch-once-window~
+This condition will activate when switching windows or after finding a file.  It is the equivalent of using Doom's =doom-first-window-hook=.
+
+**** ~satch-once-init~
+This condition will run after Emacs initialization has finished (now if it already has).
+
+** ~defer-incrementally~ and =:defer-incrementally=
+Not yet implemented.
+
+* Comparison With Other Packages
+** Comparison With =add-hooks=
+The helpers from [[https://github.com/nickmccurdy/add-hooks][add-hooks]] cannot act as drop-in replacements for ~add-hook~ and have less functionality.
+
+** Comparison with =general.el=
+Most of these utilities initially came from =general.el=.  No more non-keybinding configuration utilities will be added to =general.el=, and its successor will include no non-keybinding configuration utilities.  I am only leaving the old utilities in =general.el= for backwards-compatibility.  It is recommended you use this package instead.
+
+* Replacing Doom
+Here are packages besides this one for previously unpackaged Doom functionality:
+- [[https://github.com/ajgrf/on.el][on.el]] - Provides hooks from doom like =on-first-input-hook=
+- [[https://gitlab.com/jjzmajic/handle][handle]] - Allows having a single command to do things like start a repl, evaluate code, pull up documentation, etc.; you run ~handle~ to associate the correct functions with each feature for a major mode
+- templates - There is [[https://github.com/mineo/yatemplate][yatemplate]], but it does not currently support a lot of the things Doom's template system does (e.g. complex conditional activation)
+
+There are also the obvious packages like [[https://github.com/seagle0128/doom-modeline][doom-modeline]] and [[https://github.com/doomemacs/themes][doom-themes]].
+
+# increase max depth
+# Local Variables:
+# toc-org-max-depth: 4
+# End:
