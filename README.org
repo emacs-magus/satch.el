@@ -8,6 +8,8 @@
 # NOTE: If you are viewing this in org-mode, it is recommended that you install and enable [[https://github.com/snosov1/toc-org][toc-org]], so that all internal links open correctly
 
 # TODO add some quote and picture
+* Status
+I decided I wasn't happy with the syntax of a lot of these helpers, especially for setting variables. I wanted some totally generic `opt` that could handle anything. It's unlikely I'll publish this package. The setting helper(s) would probably be in their own separate package if I ever implement them.
 
 * About
 *NOTE: I do not recommend trying to use this package in your configuration until I have added back tests.  The new functionality in particular has barely been tested and may not work correctly for all cases.  Also, the syntax may change completely before the first release.*
